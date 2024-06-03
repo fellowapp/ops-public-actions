@@ -1,0 +1,73 @@
+name: "tailscale-k8s"
+# we need this since the default setup-node cache caches node installation binaries as well which are huge
+description: "Useful for setting up connectivity to k8s clusters using tailscale."
+inputs:
+  SETUP_KUBECONFIG:
+    description: "Setup kubeconfig"
+    required: false
+    default: "true"
+  ENDPOINT:
+    description: "eks private endpoint (normally comes from tailscale endpoint) / used to setup kubectl config"
+    required: false
+  CLUSTER_NAME:
+    description: "cluster name / used to setup kubectl config"
+    required: false
+
+  TS_OAUTH_CLIENT_ID:
+    description: "Tailscale OAUTH CLIENT ID"
+    required: true
+  TS_OAUTH_SECRET:
+    description: "Tailscale OAUTH CLIENT ID"
+    required: true
+  TS_MACHINE_TAG:
+    description: "Tailscale Machine Tag"
+    required: true
+    default: "tag:github-actions-ops-machine"
+  AWS_ACCOUNT_ID:
+    description: "AWS Account ID"
+    required: true
+  REGION:
+    description: "AWS Region"
+    required: false
+    default: "ca-central-1"
+  KUBE_CONFIG_LOCATION:
+    description: "Kubeconfig location"
+    required: true
+    default: "~/.kube/config"
+  PROXY_TRAFFIC_THROUGH_SSH:
+    description: "Add SSH Proxy"
+    required: false
+    default: "false"
+  TS_SSH_TAG:
+    description: "Tailscale SSH Tag"
+    required: false
+    default: "tag:k8s-ssh"
+
+runs:
+  using: "composite"
+  steps:
+    # we assume aws authentication is already done
+    - name: Tailscale
+      uses: tailscale/github-action@v2
+      with:
+        oauth-client-id: ${{ inputs.TS_OAUTH_CLIENT_ID }}
+        oauth-secret: ${{ inputs.TS_OAUTH_SECRET }}
+        tags: ${{ inputs.TS_MACHINE_TAG }}
+    - if: ${{ inputs.SETUP_KUBECONFIG == 'true' }}
+      shell: bash
+      run: aws eks --region ${{ inputs.REGION }} update-kubeconfig --name ${{ inputs.CLUSTER_NAME }}
+    - if: ${{ inputs.SETUP_KUBECONFIG == 'true' }}
+      shell: bash
+      run: |
+        kubectl config set-cluster arn:aws:eks:${{ inputs.REGION }}:${{ inputs.AWS_ACCOUNT_ID }}:cluster/${{ inputs.CLUSTER_NAME }} --server="${{ inputs.ENDPOINT }}"
+        cat ${{ inputs.KUBE_CONFIG_LOCATION }} | yq e 'del(.clusters[] | select(.name == "arn:aws:eks:${{ inputs.REGION }}:${{ inputs.AWS_ACCOUNT_ID }}:cluster/${{ inputs.CLUSTER_NAME }}").cluster.certificate-authority-data)' > new-kubeconfig && mv new-kubeconfig ${{ inputs.KUBE_CONFIG_LOCATION }}
+    - if: ${{ inputs.PROXY_TRAFFIC_THROUGH_SSH == 'true' }}
+      # we need gost to convert socks5 to http proxy. pulumi doesn't support socks proxy ATM
+      shell: bash
+      run: |
+        sudo snap install core
+        sudo snap install gost
+        sshendpoint=$(tailscale status --json | jq -r '.Peer[] | select(.Tags | index("${{ inputs.TS_SSH_TAG }}")) | .DNSName')
+        ssh -oStrictHostKeyChecking=no -D 1080 -q -N "root@${sshendpoint}" &
+        gost -L=http://:1081 -F=socks5://localhost:1080 &
+        echo "HTTP_PROXY=http://localhost:1081" >> $GITHUB_ENV
