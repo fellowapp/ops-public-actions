@@ -1,2 +1,2 @@
 # ops-public-actions
-public reusable actions for ops
+Action used to authenticate with tailscale and set proxies for the current runner
